@@ -4,8 +4,8 @@ import os
 import re
 from typing import Dict, Any
 
+import numpy as np
 import google.generativeai as genai
-
 
 # ------------------ CONFIG ------------------ #
 
@@ -17,7 +17,6 @@ ALLOWED_PLOTS = {
     "numeric_numeric": ["scatter"],
     "datetime_numeric": ["line"]
 }
-
 
 # ------------------ INIT ------------------ #
 
@@ -31,6 +30,24 @@ def init_gemini(api_key: str | None = None):
 
     genai.configure(api_key=key)
 
+# ------------------ TYPE CONVERSION ------------------ #
+
+def convert_to_python(obj):
+    """
+    Recursively convert numpy/Pandas types to native Python types for JSON.
+    """
+    if isinstance(obj, dict):
+        return {k: convert_to_python(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_to_python(v) for v in obj]
+    elif isinstance(obj, (np.integer, np.int64, np.int32)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64, np.float32)):
+        return float(obj)
+    elif isinstance(obj, (np.bool_)):
+        return bool(obj)
+    else:
+        return obj
 
 # ------------------ PROMPT ------------------ #
 
@@ -41,6 +58,9 @@ def build_prompt(
     """
     Build structured prompt for Gemini.
     """
+    # Convert all types to Python-native
+    column_profiles_clean = convert_to_python(column_profiles)
+    analytics_clean = convert_to_python(analytics)
 
     prompt = f"""
 You are a senior data analyst.
@@ -69,10 +89,10 @@ Allowed plot types:
 
 Metadata:
 Column profiles:
-{json.dumps(column_profiles, indent=2)}
+{json.dumps(column_profiles_clean, indent=2)}
 
 Analytics summary:
-{json.dumps(analytics, indent=2)}
+{json.dumps(analytics_clean, indent=2)}
 
 Output JSON schema:
 {{
@@ -90,23 +110,19 @@ Output JSON schema:
 """
     return prompt.strip()
 
-
 # ------------------ SAFE JSON PARSING ------------------ #
 
 def _extract_json(text: str) -> Dict[str, Any]:
     """
     Extract and parse JSON safely from Gemini output.
     """
-    # Remove markdown fences
     text = re.sub(r"```(?:json)?", "", text).strip()
 
-    # Try direct parse
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
 
-    # Try extracting JSON object
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if match:
         try:
@@ -115,7 +131,6 @@ def _extract_json(text: str) -> Dict[str, Any]:
             pass
 
     raise ValueError("Gemini response did not contain valid JSON.")
-
 
 # ------------------ GEMINI CALL ------------------ #
 
@@ -141,7 +156,6 @@ def call_gemini(prompt: str) -> Dict[str, Any]:
             "key_insights": [],
             "ml_suggestions": []
         }
-
 
 # ------------------ ORCHESTRATOR ------------------ #
 
