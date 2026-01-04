@@ -1,0 +1,156 @@
+# gemini.py
+import json
+import os
+import re
+from typing import Dict, Any
+
+import google.generativeai as genai
+
+
+# ------------------ CONFIG ------------------ #
+
+MODEL_NAME = "gemini-2.5-flash"
+
+ALLOWED_PLOTS = {
+    "numeric": ["hist", "box"],
+    "categorical": ["bar"],
+    "numeric_numeric": ["scatter"],
+    "datetime_numeric": ["line"]
+}
+
+
+# ------------------ INIT ------------------ #
+
+def init_gemini(api_key: str | None = None):
+    """
+    Initialize Gemini API.
+    """
+    key = api_key or os.getenv("GEMINI_API_KEY")
+    if not key:
+        raise ValueError("Gemini API key not provided")
+
+    genai.configure(api_key=key)
+
+
+# ------------------ PROMPT ------------------ #
+
+def build_prompt(
+    column_profiles: Dict[str, Any],
+    analytics: Dict[str, Any]
+) -> str:
+    """
+    Build structured prompt for Gemini.
+    """
+
+    prompt = f"""
+You are a senior data analyst.
+
+You are given metadata from an automated EDA system.
+You DO NOT have access to raw data.
+
+Your tasks:
+1. Summarize the dataset in plain English.
+2. Identify key data quality issues.
+3. Suggest meaningful visualizations.
+4. Highlight 4–6 key analytical insights.
+5. Suggest potential machine learning tasks (if applicable).
+
+Rules:
+- Use ONLY the provided metadata.
+- Suggest plots ONLY from allowed types.
+- Output MUST be valid JSON.
+- Do NOT include explanations outside JSON.
+
+Allowed plot types:
+- Numeric: hist, box
+- Categorical: bar
+- Numeric–Numeric: scatter
+- Datetime–Numeric: line
+
+Metadata:
+Column profiles:
+{json.dumps(column_profiles, indent=2)}
+
+Analytics summary:
+{json.dumps(analytics, indent=2)}
+
+Output JSON schema:
+{{
+  "dataset_summary": "string",
+  "data_quality_issues": ["string"],
+  "plots": [
+    {{
+      "type": "hist|box|bar|scatter|line",
+      "columns": ["col1", "col2 (if applicable)"]
+    }}
+  ],
+  "key_insights": ["string"],
+  "ml_suggestions": ["string"]
+}}
+"""
+    return prompt.strip()
+
+
+# ------------------ SAFE JSON PARSING ------------------ #
+
+def _extract_json(text: str) -> Dict[str, Any]:
+    """
+    Extract and parse JSON safely from Gemini output.
+    """
+    # Remove markdown fences
+    text = re.sub(r"```(?:json)?", "", text).strip()
+
+    # Try direct parse
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Try extracting JSON object
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+
+    raise ValueError("Gemini response did not contain valid JSON.")
+
+
+# ------------------ GEMINI CALL ------------------ #
+
+def call_gemini(prompt: str) -> Dict[str, Any]:
+    """
+    Call Gemini and parse JSON response safely.
+    """
+    try:
+        model = genai.GenerativeModel(MODEL_NAME)
+        response = model.generate_content(prompt)
+
+        if not response or not getattr(response, "text", None):
+            raise ValueError("Empty response from Gemini.")
+
+        return _extract_json(response.text)
+
+    except Exception as e:
+        # IMPORTANT: Never crash the app
+        return {
+            "dataset_summary": "Gemini insights could not be generated.",
+            "data_quality_issues": [str(e)],
+            "plots": [],
+            "key_insights": [],
+            "ml_suggestions": []
+        }
+
+
+# ------------------ ORCHESTRATOR ------------------ #
+
+def get_gemini_insights(
+    column_profiles: Dict[str, Any],
+    analytics: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Main entry point.
+    """
+    prompt = build_prompt(column_profiles, analytics)
+    return call_gemini(prompt)
